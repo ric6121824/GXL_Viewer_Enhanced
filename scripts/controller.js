@@ -32,7 +32,7 @@ myApp.controller('controller', ['$scope', function($scope) {
 			minNodeSize: 1,
 			maxNodeSize: 20,
 			minEdgeSize: 0.1,
-			maxEdgeSize: 10,
+			maxEdgeSize: 0.5,
 		}
 	});
 
@@ -98,21 +98,45 @@ myApp.controller('controller', ['$scope', function($scope) {
 	}
 
 
+	$scope.nodeScale = 5;
+
+
+
 	/** 
-	 * Function to layout the graph using Fruchterman-Reingolg algorithm
+	 * Function to layout the graph using ForceAtlas2 algorithm
 	 **/
 	$scope.layoutGraph = function()
 	{
+		if (sig.isForceAtlas2Running && sig.isForceAtlas2Running()) {
+			sig.stopForceAtlas2();
+			return;
+		}
+		
+		// [DEBUG-hub1] Verify FA2 sees all edges
+		console.log('[DEBUG-hub1] FA2 start: total nodes in graph:', sig.graph.nodes().length);
+		console.log('[DEBUG-hub1] FA2 start: total edges in graph:', sig.graph.edges().length);
+		var synthEdges = sig.graph.edges().filter(function(e) { return e.label === 'synth'; });
+		console.log('[DEBUG-hub1] FA2 start: synthetic edges:', synthEdges.length);
+		if (synthEdges.length > 0) {
+			console.log('[DEBUG-hub1] FA2 start: sample synth edge weight:', synthEdges[0].weight, typeof synthEdges[0].weight);
+		}
 
-		// Configure the Fruchterman-Reingold algorithm:
-		var frListener = sigma.layouts.fruchtermanReingold.configure(sig, {
-		  iterations: 1000, 
-		  easing: 'quadraticInOut',
-		  duration: 10000
+		sig.startForceAtlas2({
+			worker: true,
+			barnesHutOptimize: true,
+			slowDown: 10,
+			iterationsPerRender: 1,
+			edgeWeightInfluence: 1,
+			strongGravityMode: true,
+			gravity: 10
 		});
 		
-		// Start the Fruchterman-Reingold algorithm:
-		sigma.layouts.fruchtermanReingold.start(sig);
+		// Stop automatically after 3 seconds
+		setTimeout(function() {
+			if (sig.isForceAtlas2Running()) {
+				sig.stopForceAtlas2();
+			}
+		}, 3000);
 	}
 
 
@@ -138,19 +162,34 @@ myApp.controller('controller', ['$scope', function($scope) {
 	 **/
 	$scope.saveImage = function()
 	{
+		var container = document.getElementById('graph');
+		var canvases = container.getElementsByTagName('canvas');
+		if (canvases.length === 0) return;
 
-		// Get renderer
-		var myRenderer = sig.renderers[0];
-		
-		// Download the rendered graph as an image
-		myRenderer.snapshot({
-		  format: 'png',
-		  background: 'white',
-		  labels: false,
-		  download : true,
-		  filename : graphName.replace(".gxl",".png")
-		});
+		var width = canvases[0].width;
+		var height = canvases[0].height;
 
+		var offscreen = document.createElement('canvas');
+		offscreen.width = width;
+		offscreen.height = height;
+		var ctx = offscreen.getContext('2d');
+
+		// Fill white background
+		ctx.fillStyle = '#ffffff';
+		ctx.fillRect(0, 0, width, height);
+
+		// Draw each sigma canvas layer in order
+		for (var i = 0; i < canvases.length; i++) {
+			ctx.drawImage(canvases[i], 0, 0);
+		}
+
+		var dataURL = offscreen.toDataURL('image/png');
+		var a = document.createElement('a');
+		a.href = dataURL;
+		a.download = (graphName && graphName !== "") ? (graphName.replace(".gxl", ".png")) : "graph.png";
+		document.body.appendChild(a);
+		a.click();
+		document.body.removeChild(a);
 	}
 
 
@@ -198,139 +237,214 @@ myApp.controller('controller', ['$scope', function($scope) {
 	 **/
 	$scope.gxl2json = function(gxl)
 	{
+		// Helper: match element by nodeName or localName (handles XML namespaces)
+		function isTag(el, name) {
+			return el.nodeName === name || (el.localName && el.localName === name);
+		}
+
 		// Get DOM parser
 		var parser = new window.DOMParser();
 		var xmlDoc = parser.parseFromString(gxl, "text/xml");
 
-		// JSON header
-		var exportedGraph = "{";
-		exportedGraph += "\n\t" + "\"directed\": false,";
-		exportedGraph += "\n\t" + "\"graph\": [],";
-		exportedGraph += "\n\t" + "\"multigraph\": false,";
+		var graphObj = {
+			directed: false,
+			graph: [],
+			multigraph: false,
+			nodes: [],
+			edges: []
+		};
 
-		// Getting the <graph>
+		// Getting the <graph> — try childNode scan first, then getElementsByTagName fallback
+		var graphElement = null;
 		var XMLnodes = xmlDoc.firstElementChild.childNodes;
-		var indexOfGraph = 0;
-		while ((indexOfGraph < XMLnodes.length) && (XMLnodes[indexOfGraph].nodeName != "graph"))
-		{						
-			indexOfGraph++;
+		for (var k = 0; k < XMLnodes.length; k++) {
+			if (isTag(XMLnodes[k], "graph")) {
+				graphElement = XMLnodes[k];
+				break;
+			}
 		}
-		var graphNode = XMLnodes[indexOfGraph].childNodes;
+		if (!graphElement) {
+			// Namespace-aware fallback: getElementsByTagName ignores namespace prefixes
+			var byTag = xmlDoc.getElementsByTagName("graph");
+			if (byTag.length > 0) {
+				graphElement = byTag[0];
+			}
+		}
+		if (!graphElement) {
+			console.error("GXL Viewer: <graph> element not found in the file.");
+			return JSON.stringify(graphObj);
+		}
+
+		var graphChildren = graphElement.childNodes;
 
 		// Getting nodes and edges
 		var nodes = [];
 		var edges = [];
-		var i = 0;
-		while ( i < graphNode.length)
+		for (var i = 0; i < graphChildren.length; i++)
 		{
-			if (graphNode[i].nodeName == "node")
-				nodes.push(graphNode[i]);
-			else if (graphNode[i].nodeName == "edge")
-				edges.push(graphNode[i]);
-			i++;
+			if (isTag(graphChildren[i], "node"))
+				nodes.push(graphChildren[i]);
+			else if (isTag(graphChildren[i], "edge"))
+				edges.push(graphChildren[i]);
 		}
 
-		// Getting the informations from the nodes 
-		exportedGraph = "{\n\t\"nodes\": [";
 		for (i = 0 ; i < nodes.length ; i++)
 		{
-			if (nodes[i].nodeName == "node")
+			var n = nodes[i];
+			var nodeObj = {};
+			
+			// Getting the id of the node
+			nodeObj.id = n.getAttribute("id");
+
+			var label = "";
+			var x_ = null;
+			var y_ = null;
+
+			var data = n.childNodes;
+			for (var j = 0 ; j < data.length; j++)
 			{
-				var attributes = nodes[i].attributes;
-				var data = nodes[i].childNodes;
-
-				
-				
-				// Getting the id of the node
-				exportedGraph += "\n\t\t{\n";
-				exportedGraph += "\t\t\t\"id\": \"" + attributes.getNamedItem("id").value + "\",\n";
-
-				// Getting the attributes of the node 
-				var label = "";
-				var attrs = "";
-				var x_ = "";
-				var y_ = "";
-				for (j = 0 ; j < data.length; j++)
+				if(isTag(data[j], "attr"))
 				{
-					if(data[j].nodeName == "attr")
+					var attrName = data[j].getAttribute("name");
+					var firstEl = data[j].firstElementChild;
+					// Guard: some <attr> elements may have no child element
+					if (!firstEl) continue;
+					var attrValue = firstEl.textContent;
+					
+					if (attrName == "x")
 					{
-						if ( data[j].attributes.getNamedItem("name").value == "x" )
-						{
-							x_ = data[j].firstElementChild.textContent;
-						}
-						else if ( data[j].attributes.getNamedItem("name").value == "y" )
-						{
-							y_ = data[j].firstElementChild.textContent;
-						}
-						else
-						{
-							exportedGraph += "\t\t\t\"" + data[j].attributes.getNamedItem("name").value + "\": \"" + data[j].firstElementChild.textContent + "\",\n";
-							label += data[j].attributes.getNamedItem("name").value + " = " + data[j].firstElementChild.textContent + " | ";
-						}
+						x_ = parseFloat(attrValue);
+					}
+					else if (attrName == "y")
+					{
+						y_ = parseFloat(attrValue);
+					}
+					else
+					{
+						nodeObj[attrName] = attrValue;
+						label += attrName + " = " + attrValue + " | ";
 					}
 				}
-
-				// Reassign label if specified in the input file
-				if (attributes.getNamedItem("label"))
-					label = graph_prefix + attributes.getNamedItem("label").value;
-
-				exportedGraph += "\t\t\t\"label\": \"" + attrs + "\",\n";
-
-				// Assign default position if not specified ni the input file
-				if (x_ == "")
-					x_ = Math.random() * 50;
-				if (y_ == "")
-					y_ = Math.random() * 50;
-
-				// Default values (x and y coordinates, size, color,  and image representative)
-				exportedGraph += "\t\t\t\"x\": " + x_ + ",\n";
-				exportedGraph += "\t\t\t\"y\": " + y_ + ",\n";
-				exportedGraph += "\t\t\t\"size\": " + "1" + ",\n";
-				exportedGraph += "\t\t\t\"color\": \"" + "#000000" + "\"\n";
-				//exportedGraph += "\t\t\t\"representative\": \"" + "protein-structure.png" + "\"";
-
-				// Close node
-				exportedGraph += "\n\t\t},";
 			}
+
+			// Reassign label if specified in the input file
+			if (n.getAttribute("label"))
+				label = n.getAttribute("label");
+
+			nodeObj.label = label;
+
+			// Assign default position if not specified in the input file
+			if (x_ === null || isNaN(x_))
+				x_ = Math.random() * 50;
+			if (y_ === null || isNaN(y_))
+				y_ = Math.random() * 50;
+
+			// Default values
+			nodeObj.x = x_;
+			nodeObj.y = y_;
+			nodeObj.size = 1;
+			nodeObj.color = "#000000";
+
+			graphObj.nodes.push(nodeObj);
 		}
-		exportedGraph = exportedGraph.substring(0, exportedGraph.length - 1);
 
-
-		// Getting the informations from the edges 
-		exportedGraph += "\n\t],\n\t\"edges\": [";
 		var nbEdges = 0;
 		for (i = 0 ; i < edges.length ; i++)
 		{
-			if (edges[i].nodeName == "edge")
-			{
-				var attributes = edges[i].attributes; 
-				var data = edges[i].childNodes;
-				
-				exportedGraph += "\n\t\t{\n";
-				exportedGraph += "\t\t\t\"id\": \"" + "e" + nbEdges + "\",\n";
-				exportedGraph += "\t\t\t\"label\": \"" + "e" + nbEdges + "\",\n";
-				exportedGraph += "\t\t\t\"source\": \"" + attributes.getNamedItem("from").value + "\",\n";
-				exportedGraph += "\t\t\t\"target\": \"" + attributes.getNamedItem("to").value + "\",\n";
-				exportedGraph += "\t\t\t\"weight\": \"1\",\n";
-				exportedGraph += "\t\t\t\"color\": \"" + "#000000" + "\",\n";
-				exportedGraph += "\t\t\t\"size\": \"" + "1" + "\",\n";
+			var e = edges[i];
+			
+			var edgeObj = {};
+			edgeObj.id = "e" + nbEdges;
+			edgeObj.label = "e" + nbEdges;
+			edgeObj.source = e.getAttribute("from");
+			edgeObj.target = e.getAttribute("to");
+			edgeObj.weight = "1";
+			edgeObj.color = "rgba(0, 0, 0, 0.6)"; // low-transparency black
+			edgeObj.size = "0.1"; // thinner
 
-				// Getting the attributes of the edge
-				for (j = 0 ; j < data.length ; j++)
-					if(data[j].nodeName == "attr")
-						exportedGraph += "\t\t\t\"" + data[j].attributes.getNamedItem("name").value + "\": \"" + data[j].firstElementChild.textContent + "\",\n";
+			// Getting the attributes of the edge
+			var eData = e.childNodes;
+			for (var j = 0 ; j < eData.length ; j++) {
+				if(isTag(eData[j], "attr")) {
+					var attrName = eData[j].getAttribute("name");
+					var firstEl = eData[j].firstElementChild;
+					if (!firstEl) continue;
+					edgeObj[attrName] = firstEl.textContent;
+				}
+			}
+			
+			graphObj.edges.push(edgeObj);
+			nbEdges++;
+		}
+		
+		// Generate Synthetic File Hubs for Clustering
+		var fileHubs = {};
+		var palette = ["#FF5733", "#33FF57", "#3357FF", "#F033FF", "#33FFF0", "#FFC733", "#FF3333", "#33FFB8", "#8D33FF", "#FF338D", "#8B4513", "#2E8B57", "#4682B4", "#D2691E", "#9ACD32", "#4B0082", "#FF1493", "#00CED1", "#FF8C00", "#7CFC00"];
+		var colorIndex = 0;
+		var originalNodeCount = graphObj.nodes.length;
+
+		for (var k = 0; k < originalNodeCount; k++) {
+			var n = graphObj.nodes[k];
+			var file = n["Source.File"];
+			if (file && file.trim() !== "") {
+				if (!fileHubs[file]) {
+					var hubId = "hub_" + colorIndex + "_" + file.replace(/[^a-zA-Z0-9]/g, '');
+					var fileColor = palette[colorIndex % palette.length];
+					colorIndex++;
+					
+					fileHubs[file] = {
+						id: hubId,
+						color: fileColor
+					};
+					
+					graphObj.nodes.push({
+						id: hubId,
+						label: file,
+						x: Math.random() * 50,
+						y: Math.random() * 50,
+						size: 0.1,
+						color: "transparent",
+						hidden: true
+					});
+				}
 				
-				exportedGraph = exportedGraph.substring(0, exportedGraph.length - 2);
-				exportedGraph += "\n\t\t},";
+				// Apply file color to the real node
+				n.color = fileHubs[file].color;
 				
-				nbEdges++;
+				// Create synthetic edge to the hub
+				graphObj.edges.push({
+					id: "e" + nbEdges++,
+					label: "synth",
+					source: n.id,
+					target: fileHubs[file].id,
+					weight: "100",
+					color: "transparent",
+					size: "0",
+					hidden: true
+				});
 			}
 		}
-		exportedGraph = exportedGraph.substring(0, exportedGraph.length - 1);
-		
-		// Finalizing the JSON string 
-		exportedGraph += "\n\t]\n}";
-		return exportedGraph;
+
+		// [DEBUG-hub1] Verify synthetic hub generation
+		var hubCount = Object.keys(fileHubs).length;
+		var synthEdgeCount = graphObj.edges.length - edges.length;
+		console.log('[DEBUG-hub1] Unique files: ' + hubCount);
+		console.log('[DEBUG-hub1] Synthetic edges added: ' + synthEdgeCount);
+		console.log('[DEBUG-hub1] Total nodes (with hubs): ' + graphObj.nodes.length);
+		console.log('[DEBUG-hub1] Total edges (with synth): ' + graphObj.edges.length);
+		if (hubCount === 0) {
+			console.warn('[DEBUG-hub1] No Source.File attributes found! Checking first 3 nodes:');
+			for (var dbg = 0; dbg < Math.min(3, graphObj.nodes.length); dbg++) {
+				console.log('[DEBUG-hub1] Node keys:', Object.keys(graphObj.nodes[dbg]));
+			}
+		} else {
+			console.log('[DEBUG-hub1] File hubs:', JSON.stringify(fileHubs));
+			// Log a sample synthetic edge
+			var lastEdge = graphObj.edges[graphObj.edges.length - 1];
+			console.log('[DEBUG-hub1] Sample synth edge:', JSON.stringify(lastEdge));
+		}
+
+		return JSON.stringify(graphObj);
 	}
 
 
@@ -379,6 +493,20 @@ myApp.controller('controller', ['$scope', function($scope) {
 	/* GRAPH UI FUNCTIONS           */
 	/* ---------------------------- */
 
+	/** Function to deselect node (restore original colors) **/
+	$scope.deselectNode = function()
+	{
+		sig.graph.nodes().forEach(function(n) {
+			n.color = n.originalColor || n.color;
+			n.size = n.originalSize || n.size;
+		});
+		sig.graph.edges().forEach(function(e) {
+			e.color = e.originalColor || e.color;
+			e.size = e.originalSize || e.size;
+		});
+		sig.refresh();
+	};
+
 	/** Function to initialize the graph **/
 	$scope.init = function()
 	{
@@ -388,6 +516,9 @@ myApp.controller('controller', ['$scope', function($scope) {
 
 			// Set the shape of the node as square
 			n.type = "square";	
+			
+			// Set size based on degree statically
+			n.size = sig.graph.degree(n.id) || 1;
 			
 			// Save original attributes
 			n.originalColor = (n.color)? n.color : sig.settings('defaultNodeColor');
@@ -406,6 +537,50 @@ myApp.controller('controller', ['$scope', function($scope) {
 		});
 
 		// SET LISTENERS
+		
+		// Neighborhood highlighting on hover
+		sig.bind('overNode', function(e) {
+			var nodeId = e.data.node.id;
+			var neighbors = {};
+			
+			// Find all neighbors
+			sig.graph.edges().forEach(function(edge) {
+				if (edge.source === nodeId || edge.target === nodeId) {
+					neighbors[edge.source] = 1;
+					neighbors[edge.target] = 1;
+				}
+			});
+			neighbors[nodeId] = 1;
+			
+			// Dim non-neighbors
+			sig.graph.nodes().forEach(function(n) {
+				if (!neighbors[n.id]) {
+					n.color = '#eeeeee';
+				}
+			});
+			
+			// Dim non-connected edges
+			sig.graph.edges().forEach(function(edge) {
+				if (edge.source !== nodeId && edge.target !== nodeId) {
+					edge.color = 'transparent';
+				} else {
+					edge.color = '#333333'; // Highlight connected edges
+				}
+			});
+			
+			sig.refresh();
+		});
+
+		sig.bind('outNode', function(e) {
+			sig.graph.nodes().forEach(function(n) {
+				n.color = n.originalColor || n.color;
+			});
+			sig.graph.edges().forEach(function(edge) {
+				edge.color = edge.originalColor || edge.color;
+			});
+			sig.refresh();
+		});
+
 		// When the background is left clicked, not for dragging
 		sig.bind('clickStage', function(e) {
 			if (!e.data.captor.isDragging){
@@ -425,6 +600,8 @@ myApp.controller('controller', ['$scope', function($scope) {
 			}
 		});
 		
+		// Apply initial node sizing based on slider
+		$scope.updateNodeSizes();
 	};
 
 
