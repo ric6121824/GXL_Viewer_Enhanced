@@ -1,8 +1,10 @@
 # GXL Viewer Enhanced
 
-This is a customized fork of the original GXL Viewer, heavily modified to handle dense and complex GXL graphs more effectively. 
+This is a customized fork of the original frayer/GXL_Viewer, with modifications to handle dense and complex GXL graphs more effectively. 
 
-I cloned the original project and overhauled the visualization engine to meet my specific needs for analyzing large codebases and network structures.
+## Live Demo
+The tool is automatically deployed via GitHub Pages and can be accessed directly here:
+**[https://ric6121824.github.io/GXL_Viewer_Enhanced/](https://ric6121824.github.io/GXL_Viewer_Enhanced/)**
 
 ## Key Modifications
 
